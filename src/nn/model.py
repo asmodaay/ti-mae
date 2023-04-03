@@ -76,8 +76,8 @@ class MaskedAutoencoder(nn.Module):
         self.trunc_init = trunc_init
         self.embed_dim = embed_dim
         self.embedder = Embedder(in_chans,embed_dim,kernel_size=kernel_size,stride=stride,padding=padding)
-        self.pos_encoder_e = PositionalEncoding(embed_dim,dropout)
-        self.pos_encoder_d = PositionalEncoding(decoder_embed_dim,dropout)
+        self.pos_encoder_e = PositionalEncoding(embed_dim,dropout,max_len=seq_len)
+        self.pos_encoder_d = PositionalEncoding(decoder_embed_dim,dropout,max_len=seq_len)
 
 
         self.blocks = nn.ModuleList(

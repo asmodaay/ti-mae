@@ -1,25 +1,40 @@
 from src.nn.pl_model import LitAutoEncoder
 from src.data.dataset import HourParquetDataset
-
-from torch import optim, nn, utils, Tensor
+import os
+from torch import  utils
 
 import lightning.pytorch as pl
+from lightning.pytorch.callbacks import EarlyStopping,ModelCheckpoint
+from datetime import datetime
+import sys 
 
 
-autoencoder = LitAutoEncoder(in_chans=75)
+SEQ_LEN = int(sys.argv[1])
+BS = int(sys.argv[2])
 
-paths = ['/workspace/TI-MAE/2022-12-02_13:00:00.parquet',
-         '/workspace/TI-MAE/2022-12-09_13:00:00.parquet',
-         '/workspace/TI-MAE/2022-12-13_13:00:00.parquet']
+autoencoder = LitAutoEncoder(in_chans=75,
+                             seq_len=SEQ_LEN)
 
-eval_paths = ['/workspace/TI-MAE/2022-12-14_18:00:00.parquet']
+data_path = '/workspace/ti-mae/data'
+paths = [os.path.join(data_path,p) for p in sorted(os.listdir(data_path))]
 
-train_dataset = HourParquetDataset(paths,100)
-eval_dataset = HourParquetDataset(eval_paths,100,stats=[train_dataset.stats[-1]])
+eval_paths = paths[-2:]
+paths = paths[:-2]
 
-train_loader = utils.data.DataLoader(train_dataset,64,num_workers=16)
-eval_loader = utils.data.DataLoader(eval_dataset,64,num_workers=16)
+print(f'{str(datetime.now())} : Creating train dataset.')
+train_dataset = HourParquetDataset(paths,SEQ_LEN)
 
+print(f'{str(datetime.now())} : Creating eval dataset.')
 
-trainer = pl.Trainer(max_epochs=10,val_check_interval = 5000)
+eval_dataset = HourParquetDataset(eval_paths,SEQ_LEN,stats=[train_dataset.stats[-1]])
+
+train_loader = utils.data.DataLoader(train_dataset,BS,num_workers=16)
+eval_loader = utils.data.DataLoader(eval_dataset,BS*4,num_workers=16)
+
+callbacks = [ModelCheckpoint(save_top_k=2, monitor="eval_loss"),
+             EarlyStopping(patience=10,monitor="eval_loss")]
+
+trainer = pl.Trainer(max_epochs=10,val_check_interval = 5000,accelerator="gpu", 
+                     devices=-1,gradient_clip_val = 20.,
+                     callbacks = callbacks)
 trainer.fit(autoencoder,train_loader,eval_loader)

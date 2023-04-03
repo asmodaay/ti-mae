@@ -67,8 +67,10 @@ class HourParquetDataset(Dataset):
         return self.folds[-1]
 
     def __getitem__(self, idx):
-
         fold = choose_fold(self.folds,idx)
-        X = self.dsets[fold][idx:idx+self.seq_len]
 
+        if fold > 0:
+            idx -= self.folds[fold-1].item()
+
+        X = self.dsets[fold][idx:idx+self.seq_len]
         return torch.from_numpy(X.values).float().T

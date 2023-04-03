@@ -1,0 +1,2 @@
+CUDA_VISIBLE_DEVICES=0 python train.py 500 128& 
+CUDA_VISIBLE_DEVICES=1 python train.py 1000 64
