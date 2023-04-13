@@ -1,7 +1,8 @@
 *.ipynb
 __pycache__
-lightning_logs
+*lightning_logs*
 *.parquet
 *.yaml
 outputs
 *.csv
+multirun
