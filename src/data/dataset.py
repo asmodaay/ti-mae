@@ -70,9 +70,6 @@ def calc_label(series,treshold,steps):
     return target['label'],w.sort_values('label').values[:,-1]
 
 
-
-    return target['label'],target.groupby('label').count().values
-
 class HourParquetDataset(Dataset):
     def __init__(self, paths : list,seq_len=100,stats = [],
                  mode='train',scale=True,clip=False,clip_values=[],

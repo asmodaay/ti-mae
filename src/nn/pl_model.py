@@ -1,5 +1,5 @@
 import os
-from torch import optim, nn, utils, Tensor
+from torch import optim, save
 from src.nn.model import MaskedAutoencoder
 import lightning.pytorch as pl
 import torchmetrics
@@ -31,7 +31,10 @@ class LitAutoEncoder(pl.LightningModule):
         dist_metric='cid',
         cls_embed=False,
         diagonal_attention=False,
-        weights = None):
+        weights = None,
+        z_type = 'vanila',
+        bag_size= 1024,
+        lr = 1e-3):
 
         super().__init__()
         self.model = MaskedAutoencoder(in_chans,seq_len,embed_dim,depth,num_heads,
@@ -40,11 +43,16 @@ class LitAutoEncoder(pl.LightningModule):
                                        scale_mode = scale_mode, 
                                        forecast_ratio=forecast_ratio,forecast_steps=forecast_steps,
                                        n_clusters = n_clusters,dist_metric=dist_metric,cls_embed=cls_embed,
-                                       diagonal_attention=diagonal_attention,weights = weights)
+                                       diagonal_attention=diagonal_attention,weights = weights,
+                                       z_type = z_type,bag_size = bag_size)
         if cls_embed:
             self.train_f1 = torchmetrics.F1Score(task="multiclass", num_classes=len(weights),average='macro')
             self.valid_f1 = torchmetrics.Accuracy(task="multiclass", num_classes=len(weights),average='macro')
-
+        else:
+            self.train_f1 = None
+            self.valid_f1 = None
+            
+        self.lr = lr
         self.save_hyperparameters()
 
     def training_step(self, batch, batch_idx):
@@ -53,19 +61,23 @@ class LitAutoEncoder(pl.LightningModule):
         else:
             y = None
 
-        loss, logits, mask,kl_loss,cls_loss = self.model(batch,y)
+        loss, logits, pred,cl_loss,cls_loss,space_loss = self.model(batch,y)
         loss_removed , loss_seen, forecast_loss, backcast_loss = loss
 
         loss = loss_removed + 0.75 * forecast_loss + 0.5 * loss_seen + 0.2 * backcast_loss
-        if kl_loss:
-            loss += kl_loss
-            self.log("train/clustering_loss", kl_loss, sync_dist=True)
+        if cl_loss:
+            loss += cl_loss
+            self.log("train/clustering_loss", cl_loss, sync_dist=True)
 
         if cls_loss:
             loss +=cls_loss
             batch_value = self.train_f1(logits, y)
             self.log("train/cls_loss", cls_loss, sync_dist=True)
             self.log('train/F1_step', batch_value)
+        
+        if space_loss:
+            loss +=space_loss
+            self.log("train/space_loss", space_loss, sync_dist=True)
 
         self.log("train/loss_removed", loss_removed, sync_dist=True)
         self.log("train/loss_seen", loss_seen, sync_dist=True)
@@ -76,25 +88,31 @@ class LitAutoEncoder(pl.LightningModule):
         return loss
     
     def on_train_epoch_end(self,):
-        self.train_f1.reset()
+        if self.valid_f1:
+            self.train_f1.reset()
     
     def validation_step(self, batch, batch_idx):
         if len(batch) == 2:
             batch,y = batch
         else:
             y = None
-        loss, logits, mask,kl_loss,cls_loss = self.model(batch,y)
+        loss, logits, pred,cl_loss,cls_loss,space_loss = self.model(batch,y)
         loss_removed , loss_seen, forecast_loss, backcast_loss = loss
         loss = loss_removed + 0.75 * forecast_loss + 0.5 * loss_seen + 0.2 * backcast_loss
         
-        if kl_loss:
-            loss += kl_loss
-            self.log("eval/clustering_loss", kl_loss, sync_dist=True)
+        if cl_loss:
+            loss += cl_loss
+            self.log("eval/clustering_loss", cl_loss, sync_dist=True)
         
         if cls_loss:
             loss +=cls_loss
             self.valid_f1.update(logits, y)
             self.log("eval/cls_loss", cls_loss, sync_dist=True)
+        
+        if space_loss:
+            loss +=space_loss
+            self.log("eval/space_loss", space_loss, sync_dist=True)
+
 
         self.log("eval/loss_removed", loss_removed, sync_dist=True)
         self.log("eval/loss_seen", loss_seen, sync_dist=True)
@@ -105,11 +123,12 @@ class LitAutoEncoder(pl.LightningModule):
         return loss
     
     def on_validation_epoch_end(self,):
-        self.log('eval/F1_step', self.valid_f1.compute())
-        self.valid_f1.reset()
+        if self.valid_f1:
+            self.log('eval/F1_step', self.valid_f1.compute())
+            self.valid_f1.reset()
 
     def configure_optimizers(self):
-        optimizer = optim.RAdam(self.parameters(), lr=1e-5,weight_decay=1e-5)
+        optimizer = optim.RAdam(self.parameters(), lr=self.lr)
         return optimizer
 
 

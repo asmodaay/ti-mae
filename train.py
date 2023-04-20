@@ -1,7 +1,8 @@
 from src.nn.pl_model import LitAutoEncoder
 from src.data.dataset import HourParquetDataset
 import os
-from torch import  utils
+from torch import  utils,load
+
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import EarlyStopping,ModelCheckpoint
@@ -41,12 +42,15 @@ def main(cfg):
     eval_dataset = HourParquetDataset(eval_paths,
                                       stats=[train_dataset.stats[-1]], 
                                       clip_values=clip_values,
-                                      stage='eval',
+                                      mode='eval',
                                       **cfg.data)
     print(f'{str(datetime.now())} : Eval dataset size : {len(eval_paths)} hours , {len(eval_dataset)} samples.')
 
     autoencoder = LitAutoEncoder(**cfg.model,weights=train_dataset.weights)
     autoencoder._set_hparams(cfg)
+    
+    # weights = load('/workspace/ti-mae/nan_weight{batch_idx}.pt')
+    # autoencoder.load_state_dict({'model.' + k : v.cpu() for k,v in weights.items()})
 
     train_loader = utils.data.DataLoader(train_dataset,cfg.data.train_batch_size,
                                          num_workers=cfg.data.loader_workers,

@@ -8,6 +8,7 @@ import math
 from src.nn.scaler import DAIN_Layer
 from src.nn.positional import PositionalEncoding
 from src.nn.clustering import SoftKMeans
+from src.nn.vae import Lambda,VectorQuantizer
 
 class Embedder(nn.Module):
     def __init__(self,in_channels,d_model=64,kernel_size=3,stride=1,padding='same') -> None:
@@ -98,6 +99,8 @@ class MaskedAutoencoder(nn.Module):
         cls_embed = False,
         diagonal_attention = False,
         weights = None,
+        z_type = 'vanila',
+        bag_size= 1024
     ):
         super().__init__()
 
@@ -108,7 +111,7 @@ class MaskedAutoencoder(nn.Module):
         self.forecast_steps = forecast_steps
         self.mask_ratio = mask_ratio
         self.cls_embed = cls_embed
-
+        self.z_type = z_type
 
         self.embedder = Embedder(in_chans,embed_dim,kernel_size=kernel_size,stride=stride,padding=padding)
         self.pos_encoder_e = PositionalEncoding(embed_dim,dropout,max_len=seq_len+ int(cls_embed))
@@ -116,7 +119,7 @@ class MaskedAutoencoder(nn.Module):
 
         if self.cls_embed:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-            self.classifier = nn.Linear(embed_dim, len(weights) ,bias=True)
+            self.classifier = nn.Linear(decoder_embed_dim, len(weights) ,bias=True)
             self.criterion = nn.CrossEntropyLoss(weight=torch.Tensor(weights).float())
 
         if scale_mode:
@@ -145,7 +148,16 @@ class MaskedAutoencoder(nn.Module):
 
         self.norm = norm_layer(embed_dim)
 
-        self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
+        if z_type == 'vanila':
+            self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
+        elif z_type == 'vae':
+            self.decoder_embed = nn.Sequential(torch.nn.Linear(embed_dim,decoder_embed_dim),
+                                               Lambda(decoder_embed_dim, decoder_embed_dim))
+        elif z_type == 'vq-vae':
+            self.decoder_embed = nn.Sequential(torch.nn.Linear(embed_dim,decoder_embed_dim),
+                                               VectorQuantizer(bag_size,decoder_embed_dim))
+        else:
+            raise NotImplementedError
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
@@ -268,9 +280,10 @@ class MaskedAutoencoder(nn.Module):
 
         # apply Transformer blocks
         for blk in self.blocks:
-            x = blk(x,src_mask=self.src_mask)
+            x =  blk(x,src_mask=self.src_mask)
 
         x = self.norm(x)
+        x = self.decoder_embed(x)
 
         if self.cls_embed:
             # remove cls token
@@ -280,7 +293,7 @@ class MaskedAutoencoder(nn.Module):
             else:
                 cls = x[:, -1, :]
                 x = x[:, :-1, :]
-                
+
             logits = self.classifier(cls)
         else:
             logits = None
@@ -291,7 +304,6 @@ class MaskedAutoencoder(nn.Module):
         N = x.shape[0]
 
         # embed tokens
-        x = self.decoder_embed(x)
         C = x.shape[-1]
 
         # append mask tokens to sequence
@@ -311,7 +323,7 @@ class MaskedAutoencoder(nn.Module):
 
         # apply Transformer blocks
         for blk in self.decoder_blocks:
-            x = blk(x)
+            x =  blk(x)
 
         x = self.decoder_norm(x)
 
@@ -366,15 +378,25 @@ class MaskedAutoencoder(nn.Module):
         loss = self.forward_loss(x, pred, mask,latent,self.forecast_ratio,self.forecast_steps)
         
         if type(logits) != type(None):
-            cls_loss = self.criterion(nn.Softmax(-1)(logits),y)
+            cls_loss = self.criterion(logits,y)
         else:
             cls_loss = None
 
         if self.cluster_layer:
-            _,kl_loss = self.cluster_layer(latent)
+            _,cl_loss = self.cluster_layer(latent)
         else:
-            kl_loss = None
-        return loss, logits, mask, kl_loss,cls_loss
+            cl_loss = None
+
+        if self.z_type == 'vae':
+            space_loss = torch.mean(-0.5 * torch.sum(1 + self.decoder_embed.latent_logvar \
+                                                     - self.decoder_embed.latent_mean ** 2 \
+                                                        - self.decoder_embed.latent_logvar.exp(), dim = -1), dim = -1).mean(0)
+        elif self.z_type == 'vq-vae':
+            space_loss = self.decoder_embed[1].vq_loss
+        else:
+            space_loss = 0
+        
+        return loss, logits, pred, cl_loss,cls_loss,space_loss
 
     def predict(self,x,pred_samples=5):
         with torch.no_grad():
@@ -385,27 +407,36 @@ class MaskedAutoencoder(nn.Module):
             N,W,L = x.shape
             x = self.embedder(x[:,:,:-pred_samples])
 
+            # append cls token
             if self.cls_embed:
                 cls_token = self.cls_token
                 cls_tokens = cls_token.expand(x.shape[0], -1, -1)
-                x = torch.cat((cls_tokens, x), dim=1)
+                if type(self.src_mask) == None:
+                    x = torch.cat((cls_tokens,x), dim=1)
+                else:
+                    x = torch.cat((x,cls_tokens), dim=1)
 
             x = self.pos_encoder_e(x * math.sqrt(self.embed_dim))
 
             for blk in self.blocks:
-                x = blk(x)
+                x =  blk(x)
 
             x = self.norm(x) 
+            x = self.decoder_embed(x)
+
             if self.cls_embed:
-            # remove cls token
-                cls = x[:, 0, :]
-                x = x[:, 1:, :]
-            else:
-                cls = None
+                # remove cls token
+                if type(self.src_mask) == None:
+                    cls = x[:, 0, :]
+                    x = x[:, 1:, :]
+                else:
+                    cls = x[:, -1, :]
+                    x = x[:, :-1, :]
+
+                cls = self.classifier(cls)
 
             z = x.clone()
 
-            x = self.decoder_embed(x)
 
             if pred_samples:
                 mask_tokens = self.mask_token.repeat(N, pred_samples, 1)
@@ -415,7 +446,7 @@ class MaskedAutoencoder(nn.Module):
             x = self.pos_encoder_d(x)
 
             for blk in self.decoder_blocks:
-                x = blk(x)
+                x =  blk(x)
 
             x = self.decoder_norm(x)
 
